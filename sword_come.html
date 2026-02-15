@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>剑来！</title>
+    <link rel="icon" type="image/png" href="swords.png">
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&display=swap');
+
+        body { 
+            margin: 0;
+            overflow: hidden; 
+            background-color: #050505;
+            color: #39ff14; 
+            font-family: 'Courier New', monospace;
+        }
+        canvas { 
+            display: block; 
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+            z-index: 10; 
+            transform: scaleX(-1); /* 镜像翻转，符合镜子习惯 */ 
+        }
+        #video-container { display: none; }
+        
+        .cyber-font { font-family: 'Ma Shan Zheng', cursive; }
+        
+        .hud-layer { 
+            position: absolute; 
+            z-index: 20; 
+            pointer-events: none; 
+            width: 100%; 
+            height: 100%;
+            background: radial-gradient(circle at center, transparent 50%, #000 130%);
+        }
+        
+        .mode-title {
+            text-shadow: 0 0 10px rgba(57, 255, 20, 0.8), 0 0 20px rgba(57, 255, 20, 0.4);
+        }
+
+        .loading-screen {
+            position: absolute; inset: 0; background: #000; z-index: 50;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Loading -->
+    <div id="loading" class="loading-screen">
+        <div class="text-6xl text-green-400 mb-4 cyber-font tracking-widest animate-pulse">剑意凝聚中...</div>
+        <div class="mt-8 text-xs text-gray-500 border border-gray-800 p-2">
+            请授予摄像头权限以接入神识 (Camera Access Required)
+        </div>
+    </div>
+
+    <!-- HUD -->
+    <div class="hud-layer">
+        <div class="absolute top-6 left-6">
+            <h1 class="text-3xl text-green-400 cyber-font tracking-widest">灵渊剑境</h1>
+            <div class="text-xs text-green-700 mt-1 font-mono">
+                <span>[☝️ 御剑 FOLLOW]</span>
+                <span>[✊ 护阵 SHIELD]</span>
+                <span>[🖐️ 剑雨 RAIN]</span>
+                <span>[🤟 万剑归宗 ULTIMATE]</span>
+            </div>
+        </div>
+    
+        <!-- Mode Indicator -->
+        <div class="absolute bottom-16 w-full text-center">
+            <div id="mode-text" class="text-6xl cyber-font text-transparent bg-clip-text bg-gradient-to-t from-green-800 to-yellow-300 mode-title transition-all duration-500">
+                无我剑心
+            </div>
+            <div id="mode-sub" class="mt-2 text-sm text-green-500 font-mono tracking-[0.5em] opacity-80">
+                VOID MIND
+            </div>
+        </div>
+    </div>
+
+    <canvas id="output_canvas"></canvas>
+    <div id="video-container"><video class="input_video"></video></div>
+
+<script>
+/**
+ * 核心配置 (Config)
+ */
+const CONFIG = {
+    particleCount: 400,
+    baseFov: 800,        
+    colors: {
+        core: '#FFFFE0', // 剑锋极亮白黄
+        main: '#39FF14', // 主体荧光绿
+        gold: '#FFD700', // 金色剑气（混杂）
+        glow: '#39FF14'  // 辉光颜色
+    },
+    shakeIntensity: 0
+};
+
+/**
+ * 全局状态 (State)
+ */
+const STATE = {
+    mode: 'IDLE', 
+    time: 0,
+    width: window.innerWidth,
+    height: window.innerHeight,
+    camera: { x: 0, y: 0, z: 0 },
+    rainFreeze: 0,
+    trail: [],
+    trailMax: 120,
+    lastTime: 0,
+    lastCursorX: 0,
+    lastCursorY: 0,
+    cursorSpeed: 0,
+    orbitMode: false,
+    timeScale: 1,
+    // 惯性系统
+    cursor: {
+        targetX: 0, targetY: 0,
+        currentX: 0, currentY: 0,
+        velocityX: 0, velocityY: 0
+    },
+    hand: {
+        detected: false,
+        rawX: 0.5, rawY: 0.5, // 原始归一化坐标
+    }
+};
+
+// Canvas Setup
+const canvas = document.getElementById('output_canvas');
+const ctx = canvas.getContext('2d'); 
+
+/**
+ * 飞剑粒子类 (Sword Particle)
+ */
+class Sword {
+    constructor(index) {
+        this.index = index;
+        // 物理位置
+        this.pos = { x: 0, y: 0, z: 0 };
+        // 目标位置
+        this.target = { x: 0, y: 0, z: 0 };
+        // 旋转角度 (Euler)
+        this.rot = { x: 0, y: 0, z: 0 };
+        
+        // 固有属性
+        // 一部分剑是金色的，大部分是绿色的
+        this.isGold = Math.random() < 0.3; 
+        this.scaleBase = 0.8 + Math.random() * 0.4;
+        this.length = 40; 
+        
+        // 随机偏移，用于各种模式下的噪点
+        this.randomOffset = {
+            x: Math.random() * 200 - 100,
+            y: Math.random() * 200 - 100,
+            z: Math.random() * 200 - 100
+        };
+
+        // 剑雨/万剑归宗专用速度
+        this.speed = 10 + Math.random() * 30;
+    }
+
+    // 绘制一把具体的剑
+    // x, y: 屏幕坐标中心
+    // scale: 缩放比例
+    // rotation: 2D 旋转弧度 (简化版，仅做Z轴旋转投影)
+    drawShape(ctx, x, y, scale, rotation) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(rotation);
+        ctx.scale(scale, scale);
+
+        // 设置发光
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = this.isGold ? CONFIG.colors.gold : CONFIG.colors.glow;
+        
+        // 颜色
+        const colorMain = this.isGold ? '#FFD700' : '#39FF14';
+        const colorCore = '#FFFFFF';
+
+        // === 绘制剑身 (Blade) ===
+        ctx.beginPath();
+        // 剑尖 (0, -len)
+        ctx.moveTo(0, -this.length);
+        // 剑身最宽处
+        ctx.lineTo(4, 0);
+        // 剑柄连接处
+        ctx.lineTo(0, 5);
+        // 剑身左侧
+        ctx.lineTo(-4, 0);
+        ctx.closePath();
+        
+        ctx.fillStyle = colorMain;
+        ctx.fill();
+
+        // 剑脊 (高光)
+        ctx.beginPath();
+        ctx.moveTo(0, -this.length);
+        ctx.lineTo(0, 5);
+        ctx.strokeStyle = colorCore;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // === 绘制护手 (Guard) ===
+        ctx.beginPath();
+        // 简单的 V 型或 一字型护手
+        ctx.moveTo(-8, 2);
+        ctx.lineTo(0, -2);
+        ctx.lineTo(8, 2);
+        ctx.lineTo(0, 6);
+        ctx.closePath();
+        ctx.fillStyle = colorMain;
+        ctx.fill();
+
+        // === 绘制剑柄 (Hilt) ===
+        ctx.beginPath();
+        ctx.moveTo(0, 5);
+        ctx.lineTo(0, 15);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#888'; // 剑柄略暗
+        ctx.stroke();
+
+        // 剑首 (Pommel)
+        ctx.beginPath();
+        ctx.arc(0, 16, 2, 0, Math.PI*2);
+        ctx.fillStyle = colorMain;
+        ctx.fill();
+
+        ctx.restore();
+    }
+
+    update() {
+        const t = STATE.time;
+        const count = CONFIG.particleCount;
+        const indexNormal = this.index / count; // 0.0 ~ 1.0
+
+        // --- 目标计算逻辑 ---
+        
+        if (STATE.mode === 'IDLE') {
+            // == 巨剑悬浮 (Giant Sword Construction) ==
+            // 将所有粒子映射到一个巨大的剑形上
+            // 剑高约 500, 宽约 100
+            
+            // 简单的映射逻辑：根据 index 分配到 剑尖、剑身、护手、剑柄
+            
+            let lx = 0, ly = 0, lz = 0;
+            
+            // 呼吸效果
+            const breath = Math.sin(t * 1.5) * 10;
+            const floatY = Math.sin(t * 0.8) * 20;
+
+            if (indexNormal < 0.15) {
+                // 剑柄 (Hilt) & 剑首: 底部线段
+                const subP = indexNormal / 0.15;
+                lx = 0;
+                ly = 150 + subP * 80; 
+                lz = 0;
+            } else if (indexNormal < 0.30) {
+                // 护手 (Guard): 横向线段
+                const subP = (indexNormal - 0.15) / 0.15;
+                lx = (subP - 0.5) * 120; // 宽护手
+                ly = 150 - Math.abs(lx) * 0.3; // 微微上翘
+                lz = 0;
+            } else {
+                // 剑身 (Blade): 三角形分布
+                // 从护手(150) 到 剑尖(-250)
+                const subP = (indexNormal - 0.30) / 0.70; // 0(底) -> 1(尖)
+                const bladeWidthAtY = (1 - subP) * 40; // 越往上越窄
+                
+                // 在宽度内随机分布，或者边缘分布
+                // 这里做边缘分布，轮廓更清晰
+                const side = this.index % 2 === 0 ? 1 : -1;
+                lx = side * bladeWidthAtY; 
+                
+                // 偶尔填充中间
+                if (this.index % 5 === 0) lx *= Math.random(); 
+
+                ly = 150 - subP * 450; // 长度 450
+                lz = 0;
+            }
+
+            // 赋予目标
+            this.target.x = lx;
+            this.target.y = ly + floatY;
+            this.target.z = lz;
+
+            // 旋转：待机时垂直竖立，稍微转一点角度展示3D
+            this.rot.z = 0; // 自身不转，或者是整体转
+        }
+        else if (STATE.mode === 'FOLLOW') {
+            if (STATE.trail.length < 10) return;
+            
+            // 1️⃣ 让剑沿着轨迹自然分布（不是分组）
+            const spread = 0.7; 
+            const trailIndex = Math.floor(
+                (this.index / CONFIG.particleCount) * 
+                STATE.trail.length * spread
+            );
+
+            const head = STATE.trail[trailIndex];
+            const prev = STATE.trail[Math.min(trailIndex + 2, STATE.trail.length - 1)];
+
+            if (!head || !prev) return;
+
+            // 2️⃣ 计算方向
+            let vx = head.x - prev.x;
+            let vy = head.y - prev.y;
+            let len = Math.sqrt(vx*vx + vy*vy) || 1;
+
+            const tx = vx / len;
+            const ty = vy / len;
+
+            // 法向量
+            const nx = -ty;
+            const ny = tx;
+
+            // 3️⃣ 横向随机（像马拉松并排）
+            const lateral = (Math.random() - 0.5) * 80;
+
+            // 4️⃣ 前后微随机（避免整齐排队）
+            const forwardOffset = (Math.random() - 0.5) * 40;
+
+            this.target.x = head.x + nx * lateral + tx * forwardOffset;
+            this.target.y = head.y + ny * lateral + ty * forwardOffset;
+
+            // 5️⃣ 深度随轨迹递减（前面的在前）
+            this.target.z = -trailIndex * 6;
+
+            // 朝向运动方向
+            this.rot.z = Math.atan2(ty, tx) + Math.PI / 2;
+        } 
+        else if (STATE.mode === 'ULTIMATE') {
+            const total = CONFIG.particleCount;
+            const ringCount = 5;          // 五层剑阵
+            const ringIndex = this.index % ringCount;
+            const layer = Math.floor(this.index / ringCount);
+
+            const baseRadius = 250 + ringIndex * 120;
+            const angle = (layer / (total / ringCount)) * Math.PI * 2 + STATE.time * 0.3;
+
+            const targetX = Math.cos(angle) * baseRadius;
+            const targetY = Math.sin(angle) * baseRadius;
+
+            // ===== 第一阶段：悬浮聚阵 =====
+            if (STATE.phase < 3) {
+
+                this.pos.x += (targetX - this.pos.x) * 0.08;
+                this.pos.y += (targetY - this.pos.y) * 0.08;
+
+                // 轻微上下浮动
+                this.pos.y += Math.sin(STATE.time * 3 + this.index) * 1.5;
+
+                this.pos.z = 600 + Math.sin(this.index) * 50;
+
+            }
+
+            // ===== 第二阶段：神罚降临 =====
+            else {
+
+                this.pos.z -= 40 + ringIndex * 5;
+
+                if (this.pos.z < -1000) {
+                    this.pos.z = 800;
+                }
+            }
+
+            // 剑尖朝下（压制）
+            this.rot.z = Math.PI;
+        }
+        else if (STATE.mode === 'SHIELD') {
+            // == 护体 (Shield) ==
+            const phi = Math.PI * (3 - Math.sqrt(5));
+            const y = 1 - (this.index / (count - 1)) * 2;
+            const radiusAtY = Math.sqrt(1 - y * y);
+
+            // 🔥 加整体自旋（Y轴 + X轴复合）
+            const spinSpeed = 0.6;
+            const theta = phi * this.index + t * spinSpeed;
+
+            // 🔥 护阵半径加大（原来 250）
+            const r = 380;   // ← 你可以改 350~450 之间
+
+            const cx = STATE.cursor.currentX;
+            const cy = STATE.cursor.currentY;
+
+            const x = Math.cos(theta) * radiusAtY * r;
+            const yPos = y * r;
+            const z = Math.sin(theta) * radiusAtY * r;
+
+            this.target.x = cx + x;
+            this.target.y = cy + yPos;
+            this.target.z = z;
+
+            // 🔥 剑尖朝外
+            this.rot.z = Math.atan2(yPos, x) + Math.PI / 2;
+        }
+        else if (STATE.mode === 'RAIN') {
+             // == 剑雨 (Rain) ==
+            // ===== 定格阶段 =====
+            if (STATE.rainFreeze > 0) {
+                this.rot.z = Math.PI; // 朝下
+                return; // 完全不动
+            }
+
+            // ===== 同时暴雨 =====
+            this.target.y += this.speed;
+
+            if (this.target.y > STATE.height/2 + 150) {
+                this.target.y = -STATE.height/2 - 300;
+                this.target.x = (Math.random() - 0.5) * STATE.width * 1.2;
+                this.target.z = (Math.random() - 0.5) * 600;
+            }
+
+            this.pos.y = this.target.y;
+            this.pos.x = this.target.x;
+            this.pos.z = this.target.z;
+
+            this.rot.z = Math.PI;
+        }
+
+        // --- 物理更新 (Lerp) ---
+        // 只有非粒子流模式才使用 Lerp
+        if (STATE.mode !== 'ULTIMATE' && STATE.mode !== 'RAIN') {
+            let lerp = 0.1;
+            if (STATE.mode === 'IDLE') lerp = 0.10; // 聚合
+            if (STATE.mode === 'SHIELD') lerp = 0.18;
+            
+            this.pos.x += (this.target.x - this.pos.x) * lerp;
+            this.pos.y += (this.target.y - this.pos.y) * lerp;
+            this.pos.z += (this.target.z - this.pos.z) * lerp;
+        }
+    }
+
+    draw(ctx) {
+        // --- 3D 投影 ---
+        const fov = CONFIG.baseFov;
+        // 震动
+        const shakeX = (Math.random()-0.5) * CONFIG.shakeIntensity;
+        const shakeY = (Math.random()-0.5) * CONFIG.shakeIntensity;
+
+        // 透视除法
+        // z 越大越远 (scale 越小)
+        // 假设 camera 在 z=0, 物体在 z
+        // 这里 camera.z 是偏移量
+        const scale = fov / (fov + this.pos.z + STATE.camera.z);
+        
+        if (scale < 0.1) return; // 太近或在背后
+
+        const x2d = this.pos.x * scale + STATE.width/2 + shakeX;
+        const y2d = this.pos.y * scale + STATE.height/2 + shakeY;
+
+        // 绘制形状
+        // 旋转处理：
+        // 如果是 IDLE 模式，做一点自旋让巨剑看起来立体
+        let r = this.rot.z;
+        if (STATE.mode === 'IDLE') {
+             // 整体缓慢旋转巨剑
+             // 这里简单处理：根据 z 坐标微调 x 位置没法直接做 3D 旋转
+             // 仅做简单的视觉修正
+             r = 0; 
+        }
+
+        this.drawShape(ctx, x2d, y2d, scale * this.scaleBase, r);
+    }
+}
+
+// 初始化
+const swords = Array.from({length: CONFIG.particleCount}, (_, i) => new Sword(i));
+
+const stars = Array.from({length: 300}, () => ({
+    x: (Math.random() - 0.5) * window.innerWidth,
+    y: (Math.random() - 0.5) * window.innerHeight,
+    z: Math.random() * 800,
+    size: Math.random() * 2 + 0.5
+}));
+
+function drawStars() {
+    const fov = CONFIG.baseFov;
+
+    stars.forEach(star => {
+        // 星星缓慢向前移动（营造空间感）
+        star.z -= 0.5;
+
+        if (star.z < 1) {
+            star.z = 800;
+            star.x = (Math.random() - 0.5) * STATE.width;
+            star.y = (Math.random() - 0.5) * STATE.height;
+        }
+
+        const scale = fov / (fov + star.z);
+        const x2d = star.x * scale + STATE.width / 2;
+        const y2d = star.y * scale + STATE.height / 2;
+        const size = star.size * scale;
+
+        ctx.beginPath();
+        ctx.arc(x2d, y2d, size, 0, Math.PI * 2);
+        ctx.fillStyle = "white";
+        ctx.fill();
+    });
+}
+
+// 主循环
+function animate(t) {
+    if (!STATE.lastTime) STATE.lastTime = t;
+
+    const delta = (t - STATE.lastTime) * 0.001;
+    STATE.lastTime = t;
+
+    STATE.time += delta * STATE.timeScale;
+
+    if (STATE.rainFreeze > 0) {
+    STATE.rainFreeze -= 0.016; // 约60fps
+    }
+    
+    // 更新惯性光标 (Physics Cursor)
+    updatePhysicsCursor();
+    
+
+    // 清屏 (保持黑色背景)
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // 重新填充背景，防止 shadowBlur 叠加过亮
+    ctx.fillStyle = "#050505";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // 绘制背景星空
+    drawStars();
+
+    // 镜头动态
+    let targetZ = 0;
+    let targetShake = 0;
+    
+    if (STATE.mode === 'SHIELD') targetZ = 100;
+    if (STATE.mode === 'ULTIMATE') {
+        targetZ = -100; 
+        targetShake = 5;
+    }
+    // IDLE 时拉远一点看巨剑
+    if (STATE.mode === 'IDLE') targetZ = 200;
+
+    STATE.camera.z += (targetZ - STATE.camera.z) * 0.05;
+    CONFIG.shakeIntensity = targetShake;
+
+    // 排序：Z轴深度排序，保证遮挡关系正确 (Painter's Algorithm)
+    // 远的先画
+    swords.sort((a, b) => b.pos.z - a.pos.z);
+    
+    swords.forEach(s => {
+        s.update();
+        s.draw(ctx);
+    });
+
+    requestAnimationFrame(animate);
+}
+
+// 物理光标逻辑
+function updatePhysicsCursor() {
+    // 目标位置：如果有手，就是手的位置；没手，就是屏幕中心或漫游
+    let tx = 0;
+    let ty = 0;
+
+    if (STATE.hand.detected) {
+        // 映射到以中心为原点的坐标系
+        tx = (STATE.hand.rawX - 0.5) * STATE.width; 
+        ty = (STATE.hand.rawY - 0.5) * STATE.height;
+        // 增加一点灵敏度倍率
+        tx *= 1.5;
+        ty *= 1.5;
+    } else {
+        // 没手时的自动漫游
+        if (STATE.mode === 'FOLLOW') {
+            tx = Math.sin(STATE.time) * 300;
+            ty = Math.cos(STATE.time * 0.8) * 150;
+        }
+    }
+
+    // 弹簧阻尼 (Spring Damper)
+    const spring = 0.05; // 弹性系数
+    const friction = 0.85; // 摩擦力
+
+    // 加速度
+    const ax = (tx - STATE.cursor.currentX) * spring;
+    const ay = (ty - STATE.cursor.currentY) * spring;
+
+    // 速度更新
+    STATE.cursor.velocityX += ax;
+    STATE.cursor.velocityY += ay;
+    STATE.cursor.velocityX *= friction;
+    STATE.cursor.velocityY *= friction;
+
+    // 位置更新
+    STATE.cursor.currentX += STATE.cursor.velocityX;
+    STATE.cursor.currentY += STATE.cursor.velocityY;
+
+    // 记录轨迹历史
+    STATE.trail.unshift({
+        x: STATE.cursor.currentX,
+        y: STATE.cursor.currentY
+    });
+
+    if (STATE.trail.length > STATE.trailMax) {
+        STATE.trail.pop();
+    }
+    const dx = STATE.cursor.currentX - STATE.lastCursorX;
+    const dy = STATE.cursor.currentY - STATE.lastCursorY;
+
+    STATE.cursorSpeed = Math.sqrt(dx*dx + dy*dy);
+
+    STATE.lastCursorX = STATE.cursor.currentX;
+    STATE.lastCursorY = STATE.cursor.currentY;
+
+    // 判断是否进入绕圈
+    STATE.orbitMode = STATE.cursorSpeed < 1.5;
+
+}
+
+// MediaPipe Setup
+const videoEl = document.getElementsByClassName('input_video')[0];
+const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+
+hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.6
+});
+
+hands.onResults(res => {
+    if (res.multiHandLandmarks && res.multiHandLandmarks.length > 0) {
+        STATE.hand.detected = true;
+        const lm = res.multiHandLandmarks[0];
+        const palm = lm[9]; // 中指根部作为手掌中心
+        
+        // 原始坐标直接存，物理光标会处理平滑
+        STATE.hand.rawX = palm.x;
+        STATE.hand.rawY = palm.y;
+        
+        detectGesture(lm);
+    } else {
+        STATE.hand.detected = false;
+        if (STATE.mode !== 'IDLE' && STATE.time > 2) updateMode('IDLE');
+    }
+});
+
+const camera = new Camera(videoEl, {
+    onFrame: async () => await hands.send({image: videoEl}),
+    width: 640, height: 480
+});
+
+function detectGesture(lm) {
+    const isUp = (tip, pip) => lm[tip].y < lm[pip].y; 
+    const idx = isUp(8, 6);
+    const mid = isUp(12, 10);
+    const ring = isUp(16, 14);
+    const pinky = isUp(20, 18);
+    // 拇指判断略复杂，简化为判断x距离
+    const thumbOut = Math.abs(lm[4].x - lm[9].x) > 0.05;
+
+    let m = STATE.mode; // 默认保持
+    
+    // 逻辑判定
+    if (idx && pinky && !mid && !ring && thumbOut) m = 'ULTIMATE'; // 🤟
+    else if (idx && mid && ring && pinky) m = 'RAIN'; // 🖐️
+    else if (!idx && !mid && !ring && !pinky) m = 'SHIELD'; // ✊
+    else if (idx && !mid && !ring && !pinky) m = 'FOLLOW'; // ☝️
+    else if (idx && mid && !ring && !pinky) m = 'FOLLOW'; // ✌️ 也可以算御剑
+
+    // 状态防抖 (简单的)
+    if (m !== STATE.mode) updateMode(m);
+}
+
+function updateMode(mode) {
+    STATE.timeScale = 1;
+    STATE.mode = mode;
+
+    // ===== 进入剑雨时强制重置 =====
+    if (mode === 'RAIN') {
+
+        STATE.rainFreeze = 0.2; // ⭐ 0.2秒定格
+
+        swords.forEach(s => {
+
+            // 全部瞬移到天空
+            s.target.x = (Math.random() - 0.5) * STATE.width * 1.2;
+            s.target.y = -STATE.height/2 - 400 - Math.random() * 400;
+            s.target.z = (Math.random() - 0.5) * 600;
+
+            // 直接同步位置（防止继承护阵）
+            s.pos.x = s.target.x;
+            s.pos.y = s.target.y;
+            s.pos.z = s.target.z;
+
+            s.speed = 20 + Math.random() * 20;
+        });
+    }
+
+    if (mode === 'ULTIMATE') {
+        STATE.timeScale = 0.2;
+
+        setTimeout(() => {
+            STATE.timeScale = 1.6;
+        }, 600);
+
+        setTimeout(() => {
+            STATE.timeScale = 1;
+        }, 1200);
+
+        swords.forEach(s => {
+
+            s.pos.z = 1000 + Math.random() * 1200;
+
+            s.pos.x = (Math.random() - 0.5) * STATE.width * 2;
+            s.pos.y = (Math.random() - 0.5) * STATE.height * 2;
+
+            s.speed = 35 + Math.random() * 35;
+        });
+    }
+
+
+    const txt = document.getElementById('mode-text');
+    const sub = document.getElementById('mode-sub');
+    
+    const map = {
+        'IDLE': ['无我剑心', 'VOID MIND'],
+        'FOLLOW': ['御剑随行', 'SWORD FOLLOW'],
+        'SHIELD': ['天罡剑阵', 'CELESTIAL GUARD'],
+        'RAIN': ['剑雨星河', 'SWORDS RAIN'],
+        'ULTIMATE': ['万剑归宗', 'INFINITE SWORDS']
+    };
+    
+    txt.innerText = map[mode][0];
+    sub.innerText = map[mode][1];
+    
+    // UI 动画重置
+    txt.classList.remove('scale-150', 'text-red-500');
+    void txt.offsetWidth; 
+    
+    
+    if (mode === 'ULTIMATE') {
+        txt.className = "text-6xl cyber-font text-transparent bg-clip-text bg-gradient-to-t from-green-800 to-yellow-300 mode-title transition-all duration-500";
+    } else {
+        txt.className = "text-6xl cyber-font text-transparent bg-clip-text bg-gradient-to-t from-green-800 to-yellow-300 mode-title transition-all duration-500";
+    }
+
+    // 模式切换时的粒子重置逻辑（可选）
+    // 如果是从 ULTIMATE 切出，重置位置以防散太远
+    if (mode === 'IDLE') {
+        swords.forEach(s => {
+            s.target.x = 0; s.target.y = 0; s.target.z = 0;
+        });
+    }
+}
+
+// 启动
+const loadScreen = document.getElementById('loading');
+camera.start().then(() => {
+    loadScreen.style.opacity = 0;
+    setTimeout(() => loadScreen.style.display = 'none', 1000);
+    
+    window.onresize = () => {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        STATE.width = canvas.width;
+        STATE.height = canvas.height;
+    };
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    
+    requestAnimationFrame(animate);
+});
+
+</script>
+</body>
+</html>
