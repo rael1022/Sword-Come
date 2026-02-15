@@ -55,7 +55,6 @@
     </style>
 </head>
 <body>
-
     <!-- Loading -->
     <div id="loading" class="loading-screen">
         <div class="text-6xl text-green-400 mb-4 cyber-font tracking-widest animate-pulse">剑意凝聚中...</div>
@@ -88,6 +87,10 @@
     </div>
 
     <canvas id="output_canvas"></canvas>
+    <audio id="bgm" loop>
+        <source src="sword_bgm.mp3" type="audio/mpeg">
+        您的浏览器不支持音频播放
+    </audio>
     <div id="video-container"><video class="input_video"></video></div>
 
 <script>
@@ -762,6 +765,51 @@ function updateMode(mode) {
 
 // 启动
 const loadScreen = document.getElementById('loading');
+// BGM 元素
+const bgm = document.getElementById('bgm');
+
+// 播放函数（渐入效果，可选）
+function startBGM() {
+    bgm.volume = 0;
+    bgm.play().catch(()=>{ console.log("需要用户交互才能播放BGM"); });
+    
+    // 渐入效果
+    const step = 0.02;
+    const fade = setInterval(() => {
+        if(bgm.volume < 1){
+            bgm.volume = Math.min(bgm.volume + step, 1);
+        } else {
+            clearInterval(fade);
+        }
+    }, 100); // 每100ms增加
+}
+
+// 在摄像头授权后尝试播放 BGM
+camera.start().then(() => {
+    // 移除 loading
+    loadScreen.style.opacity = 0;
+    setTimeout(() => loadScreen.style.display = 'none', 1000);
+
+    // 播放 BGM
+    startBGM();
+
+    // canvas 尺寸
+    window.onresize = () => {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        STATE.width = canvas.width;
+        STATE.height = canvas.height;
+    };
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    requestAnimationFrame(animate);
+});
+
+// 额外备份：用户触碰页面也能播放
+document.body.addEventListener('click', startBGM, { once: true });
+document.body.addEventListener('touchstart', startBGM, { once: true });
+
 camera.start().then(() => {
     loadScreen.style.opacity = 0;
     setTimeout(() => loadScreen.style.display = 'none', 1000);
