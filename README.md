@@ -1,4 +1,4 @@
-# <img src="swords.png" alt="Sword Logo" width="40"> 剑来 / Sword Come
+# <img src="swords.png" alt="Sword Logo" width="40"> 剑来 Sword Come
 
 **剑来** 是一个网页飞剑体验项目，通过 **手势识别控制剑的动作**，让你在浏览器中施展御剑、护阵、剑雨、万剑归宗等炫酷剑术。  
 
@@ -40,12 +40,12 @@ Sword Come is a browser-based sword simulation project. You can control flying s
 - ⚡ **多模式物理效果 (Multiple Sword Physics Modes)**  
   - 御剑随行: 剑沿手势轨迹飞行  
   - 剑雨: 剑从天而降，随机散开  
-  - 万剑归宗: 五层剑阵旋转聚集  
-  - 天罡剑阵: 剑形成护盾包围手势位置  
+  - 万剑归宗: 剑阵聚集后向前冲出，形成压制效果  
+  - 天罡剑阵: 剑形成护盾包围手势位置 
 
   - Sword Follow: swords follow hand trajectory  
   - Swords Rain: swords fall from sky randomly  
-  - Infinite Swords: 5-layer rotating sword formation  
+  - Infinite Swords: swords gather, then shoot forward creating a crushing effect  
   - Celestial Guard: swords form shield around hand
 
 ---
